@@ -1,12 +1,11 @@
 /**
- * app.js
- * カメラ台形補正シミュレーター - メインアプリケーション
+ * app.js — カメラ台形補正シミュレーター（Canvas 2D 専用）
  */
 
 'use strict';
 
 // ==========================================
-// DOM 要素の取得
+// DOM 要素
 // ==========================================
 const dom = {
   cameraSelect:      document.getElementById('camera-select'),
@@ -19,6 +18,7 @@ const dom = {
   vertOffsetValue:   document.getElementById('vert-offset-value'),
   horizOffsetSlider: document.getElementById('horiz-offset-slider'),
   horizOffsetValue:  document.getElementById('horiz-offset-value'),
+  qualitySelect:     document.getElementById('quality-select'),
   resetBtn:          document.getElementById('reset-btn'),
   showGrid:          document.getElementById('show-grid'),
   showOriginal:      document.getElementById('show-original'),
@@ -39,20 +39,20 @@ const dom = {
 // アプリケーション状態
 // ==========================================
 const state = {
-  isRunning:        false,
-  stream:           null,
-  animFrameId:      null,
-  topWidth:         100,   // %
-  vertOffset:       0,     // %
-  horizOffset:      0,     // %
-  useNearest:       false,
-  showGrid:         false,
-  showOriginal:     false,
-  lastFrameTime:    0,
-  frameCount:       0,
-  fps:              0,
-  canvasW:          0,
-  canvasH:          0,
+  isRunning:     false,
+  stream:        null,
+  animFrameId:   null,
+  topWidth:      100,   // %
+  vertOffset:    0,     // %
+  horizOffset:   0,     // %
+  quality:       'medium',
+  showGrid:      false,
+  showOriginal:  false,
+  lastFrameTime: 0,
+  frameCount:    0,
+  fps:           0,
+  canvasW:       0,
+  canvasH:       0,
 };
 
 // ==========================================
@@ -77,12 +77,9 @@ function setupCanvasSize() {
 // ==========================================
 async function enumerateCameras() {
   try {
-    // 権限を取得するために一度ストリームを開く
     const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
     tempStream.getTracks().forEach(t => t.stop());
-  } catch (e) {
-    console.warn('カメラへのアクセスが拒否されました:', e);
-  }
+  } catch (_e) { /* 権限取得失敗は握りつぶす */ }
 
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -96,14 +93,14 @@ async function enumerateCameras() {
     }
 
     videoDevices.forEach((device, index) => {
-      const option = document.createElement('option');
-      option.value = device.deviceId;
-      option.textContent = device.label || `カメラ ${index + 1}`;
-      dom.cameraSelect.appendChild(option);
+      const opt = document.createElement('option');
+      opt.value = device.deviceId;
+      opt.textContent = device.label || `カメラ ${index + 1}`;
+      dom.cameraSelect.appendChild(opt);
     });
   } catch (e) {
     console.error('デバイス列挙エラー:', e);
-    dom.cameraSelect.innerHTML = '<option value="">デバイスの取得に失敗</option>';
+    dom.cameraSelect.innerHTML = '<option value="">デバイス取得失敗</option>';
   }
 }
 
@@ -118,10 +115,7 @@ async function startCamera() {
   dom.startBtn.disabled = true;
 
   try {
-    // 既存ストリームを停止
-    if (state.stream) {
-      state.stream.getTracks().forEach(t => t.stop());
-    }
+    if (state.stream) state.stream.getTracks().forEach(t => t.stop());
 
     const constraints = {
       video: {
@@ -134,30 +128,22 @@ async function startCamera() {
     state.stream = await navigator.mediaDevices.getUserMedia(constraints);
     dom.sourceVideo.srcObject = state.stream;
 
-    await new Promise((resolve) => {
-      dom.sourceVideo.onloadedmetadata = resolve;
-    });
+    await new Promise(resolve => { dom.sourceVideo.onloadedmetadata = resolve; });
     await dom.sourceVideo.play();
 
-    const track = state.stream.getVideoTracks()[0];
-    const settings = track.getSettings();
+    const settings = state.stream.getVideoTracks()[0].getSettings();
     dom.infoResolution.textContent = `解像度: ${settings.width || '?'} × ${settings.height || '?'}`;
 
     state.isRunning = true;
-    dom.stopBtn.disabled = false;
+    dom.stopBtn.disabled       = false;
     dom.screenshotBtn.disabled = false;
     dom.placeholder.classList.add('hidden');
     setStatus('active', '配信中 ●');
 
-    // WebGL レンダラー初期化
     setupCanvasSize();
-    if (!Renderer.isReady()) {
-      Renderer.init(dom.outputCanvas);
-    }
+    if (!Renderer.isReady()) Renderer.init(dom.outputCanvas);
 
-    // 描画ループ開始
     renderLoop();
-
   } catch (e) {
     console.error('カメラ起動エラー:', e);
     setStatus('error', 'エラー: ' + (e.message || e.name));
@@ -175,7 +161,6 @@ function stopCamera() {
     cancelAnimationFrame(state.animFrameId);
     state.animFrameId = null;
   }
-
   if (state.stream) {
     state.stream.getTracks().forEach(t => t.stop());
     state.stream = null;
@@ -183,30 +168,23 @@ function stopCamera() {
 
   dom.sourceVideo.srcObject = null;
   dom.placeholder.classList.remove('hidden');
-  dom.startBtn.disabled = false;
-  dom.stopBtn.disabled  = true;
+  dom.startBtn.disabled      = false;
+  dom.stopBtn.disabled       = true;
   dom.screenshotBtn.disabled = true;
   setStatus('idle', '待機中');
   dom.infoFps.textContent = 'FPS: --';
 
-  // キャンバスをクリア
-  const gl = Renderer.getContext();
-  if (gl) {
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-  }
+  Renderer.clear();
   clearOverlay();
 }
 
 // ==========================================
-// メイン描画ループ
+// 描画ループ
 // ==========================================
 function renderLoop() {
   if (!state.isRunning) return;
 
   const now = performance.now();
-
-  // FPS 計算
   state.frameCount++;
   if (now - state.lastFrameTime >= 1000) {
     state.fps = state.frameCount;
@@ -215,7 +193,6 @@ function renderLoop() {
     dom.infoFps.textContent = `FPS: ${state.fps}`;
   }
 
-  // ビデオが再生可能かチェック
   if (dom.sourceVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     renderFrame();
   }
@@ -224,46 +201,26 @@ function renderLoop() {
 }
 
 // ==========================================
-// フレーム描画（射影変換）
+// フレーム描画（Canvas 2D 台形補正）
 // ==========================================
 function renderFrame() {
-  const W = state.canvasW;
-  const H = state.canvasH;
-
-  // 変換点を計算
-  const { src, dst } = Homography.buildTransformPoints(
+  // Canvas 2D レンダラに丸投げ
+  Renderer.renderFrame(
+    dom.sourceVideo,
     state.topWidth,
     state.vertOffset,
     state.horizOffset,
-    W, H
+    state.quality
   );
 
-  // 射影変換行列を計算（src → dst）
-  const H_mat = Homography.computeHomography(src, dst);
-  if (!H_mat) return;
-
-  // 逆行列（dst → src）で逆マッピング
-  const invH = Homography.invertMatrix3x3(H_mat);
-  if (!invH) return;
-
-  // WebGL で描画
-  Renderer.renderFrame(dom.sourceVideo, invH, state.useNearest);
-
-  // 原映像オーバーレイ
-  if (state.showOriginal) {
-    drawOriginalOverlay(src);
-  }
-
-  // グリッドオーバーレイ
-  if (state.showGrid) {
-    drawGridOverlay();
-  } else if (!state.showOriginal) {
-    clearOverlay();
-  }
+  // オーバーレイ描画
+  if (state.showOriginal) drawTrapezoidOutline();
+  if (state.showGrid)     drawGridOverlay();
+  if (!state.showOriginal && !state.showGrid) clearOverlay();
 }
 
 // ==========================================
-// グリッドオーバーレイ描画
+// グリッドオーバーレイ
 // ==========================================
 function drawGridOverlay() {
   const ctx = dom.overlayCanvas.getContext('2d');
@@ -272,77 +229,69 @@ function drawGridOverlay() {
 
   ctx.clearRect(0, 0, W, H);
 
-  const DIVISIONS = 8;
-  ctx.strokeStyle = 'rgba(79, 142, 247, 0.35)';
-  ctx.lineWidth = 1;
+  const DIV = 8;
+  ctx.strokeStyle = 'rgba(79,142,247,0.35)';
+  ctx.lineWidth   = 1;
 
-  // 縦線
-  for (let i = 1; i < DIVISIONS; i++) {
-    const x = (W / DIVISIONS) * i;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, H);
-    ctx.stroke();
+  for (let i = 1; i < DIV; i++) {
+    const x = (W / DIV) * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let j = 1; j < DIV; j++) {
+    const y = (H / DIV) * j;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
-  // 横線
-  for (let j = 1; j < DIVISIONS; j++) {
-    const y = (H / DIVISIONS) * j;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(W, y);
-    ctx.stroke();
-  }
-
-  // 中央十字
-  ctx.strokeStyle = 'rgba(247, 195, 79, 0.5)';
-  ctx.lineWidth = 1.5;
+  // 中央十字（点線）
+  ctx.strokeStyle = 'rgba(247,195,79,0.5)';
+  ctx.lineWidth   = 1.5;
   ctx.setLineDash([6, 4]);
-
-  ctx.beginPath();
-  ctx.moveTo(W / 2, 0);
-  ctx.lineTo(W / 2, H);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(0, H / 2);
-  ctx.lineTo(W, H / 2);
-  ctx.stroke();
-
+  ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
   ctx.setLineDash([]);
 }
 
 // ==========================================
-// 原映像輪郭オーバーレイ（台形の枠線）
+// 台形輪郭オーバーレイ（原映像の切り取り範囲を表示）
 // ==========================================
-function drawOriginalOverlay(srcPoints) {
+function drawTrapezoidOutline() {
   const ctx = dom.overlayCanvas.getContext('2d');
   const W = dom.overlayCanvas.width;
   const H = dom.overlayCanvas.height;
 
   ctx.clearRect(0, 0, W, H);
 
-  // 台形を射影変換後の座標で表示
-  // ここでは変換前の台形の形をキャンバス上に半透明で表示
+  const topRatio  = state.topWidth / 100;
+  const vertOff   = (state.vertOffset   / 100) * H;
+  const horizOff  = (state.horizOffset  / 100) * W;
+
+  const topW     = W * topRatio;
+  const topLeft  = (W - topW) / 2 + horizOff;
+  const topRight = topLeft + topW;
+  const botLeft  = 0   + horizOff * 0.5;
+  const botRight = W   + horizOff * 0.5;
+  const topY     = 0   + vertOff;
+  const botY     = H   + vertOff;
+
   ctx.beginPath();
-  ctx.moveTo(srcPoints[0].x, H - srcPoints[0].y);
-  ctx.lineTo(srcPoints[1].x, H - srcPoints[1].y);
-  ctx.lineTo(srcPoints[2].x, H - srcPoints[2].y);
-  ctx.lineTo(srcPoints[3].x, H - srcPoints[3].y);
+  ctx.moveTo(topLeft,  topY);
+  ctx.lineTo(topRight, topY);
+  ctx.lineTo(botRight, botY);
+  ctx.lineTo(botLeft,  botY);
   ctx.closePath();
 
-  ctx.strokeStyle = 'rgba(247, 195, 79, 0.8)';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(247,195,79,0.8)';
+  ctx.lineWidth   = 2;
   ctx.setLineDash([8, 4]);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // 上辺をハイライト
+  // 上辺を赤でハイライト
   ctx.beginPath();
-  ctx.moveTo(srcPoints[0].x, H - srcPoints[0].y);
-  ctx.lineTo(srcPoints[1].x, H - srcPoints[1].y);
-  ctx.strokeStyle = 'rgba(247, 95, 95, 0.9)';
-  ctx.lineWidth = 3;
+  ctx.moveTo(topLeft, topY);
+  ctx.lineTo(topRight, topY);
+  ctx.strokeStyle = 'rgba(247,95,95,0.9)';
+  ctx.lineWidth   = 3;
   ctx.stroke();
 }
 
@@ -358,31 +307,23 @@ function clearOverlay() {
 // ステータス更新
 // ==========================================
 function setStatus(type, text) {
-  dom.cameraStatus.className = `status-badge status-${type}`;
+  dom.cameraStatus.className  = `status-badge status-${type}`;
   dom.cameraStatus.textContent = text;
 }
 
 // ==========================================
-// 台形プレビュー更新
+// 台形 SVG プレビュー更新
 // ==========================================
 function updateTrapezoidPreview() {
-  const topRatio = state.topWidth / 100;
-  const svgW = 200, svgH = 120;
-  const margin = 10;
-  const botLeft  = margin;
-  const botRight = svgW - margin;
-  const botY     = svgH - margin;
-  const topW     = (svgW - margin * 2) * topRatio;
-  const topLeft  = (svgW - topW) / 2;
-  const topRight = topLeft + topW;
-  const topY     = margin;
+  const svgW = 200, svgH = 120, margin = 10;
+  const p = Homography.calcPreviewPoints(state.topWidth, svgW, svgH, margin);
 
-  const points = `${topLeft},${topY} ${topRight},${topY} ${botRight},${botY} ${botLeft},${botY}`;
+  const points = `${p.topLeft},${p.topY} ${p.topRight},${p.topY} ${p.botRight},${p.botY} ${p.botLeft},${p.botY}`;
   dom.trapezoidShape.setAttribute('points', points);
-  dom.topLine.setAttribute('x1', topLeft);
-  dom.topLine.setAttribute('x2', topRight);
-  dom.topLine.setAttribute('y1', topY);
-  dom.topLine.setAttribute('y2', topY);
+  dom.topLine.setAttribute('x1', p.topLeft);
+  dom.topLine.setAttribute('x2', p.topRight);
+  dom.topLine.setAttribute('y1', p.topY);
+  dom.topLine.setAttribute('y2', p.topY);
 }
 
 // ==========================================
@@ -393,30 +334,48 @@ function updateInfoBar() {
 }
 
 // ==========================================
-// スライダーと数値入力の同期ヘルパー
+// スライダートラック色更新
 // ==========================================
-function syncSliderAndInput(slider, input, key, decimals = 0) {
+function updateSliderTrack(slider) {
+  const min = parseFloat(slider.min);
+  const max = parseFloat(slider.max);
+  const val = parseFloat(slider.value);
+  const pct = ((val - min) / (max - min)) * 100;
+  slider.style.background =
+    `linear-gradient(to right, var(--accent-blue) 0%, var(--accent-cyan) ${pct}%, var(--bg-input) ${pct}%)`;
+}
+
+function initSliderTracks() {
+  [dom.topWidthSlider, dom.vertOffsetSlider, dom.horizOffsetSlider].forEach(sl => {
+    updateSliderTrack(sl);
+    sl.addEventListener('input', () => updateSliderTrack(sl));
+  });
+}
+
+// ==========================================
+// スライダーと数値入力の同期
+// ==========================================
+function syncSliderAndInput(slider, input, key) {
   slider.addEventListener('input', () => {
     const val = parseFloat(slider.value);
     state[key] = val;
-    input.value = val.toFixed(decimals);
+    input.value = val;
     updateSliderTrack(slider);
     onParamChange();
   });
-
   input.addEventListener('change', () => {
     let val = parseFloat(input.value);
     val = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), val));
     state[key] = val;
     slider.value = val;
-    input.value = val.toFixed(decimals);
+    input.value  = val;
     updateSliderTrack(slider);
     onParamChange();
   });
 }
 
 // ==========================================
-// パラメータ変更時の共通処理
+// パラメータ変更共通処理
 // ==========================================
 function onParamChange() {
   updateTrapezoidPreview();
@@ -439,70 +398,7 @@ function resetParams() {
   dom.horizOffsetValue.value  = 0;
 
   [dom.topWidthSlider, dom.vertOffsetSlider, dom.horizOffsetSlider].forEach(updateSliderTrack);
-
   onParamChange();
-}
-
-// ==========================================
-// リサイズハンドラ
-// ==========================================
-function onResize() {
-  setupCanvasSize();
-  if (!state.isRunning) {
-    clearOverlay();
-  }
-}
-
-// ==========================================
-// 補間方式の変更
-// ==========================================
-function onInterpolationChange() {
-  const selected = document.querySelector('input[name="interpolation"]:checked');
-  state.useNearest = selected?.value === 'nearest';
-}
-
-// ==========================================
-// イベントリスナー登録
-// ==========================================
-function registerEvents() {
-  dom.startBtn.addEventListener('click', startCamera);
-  dom.stopBtn.addEventListener('click', stopCamera);
-  dom.resetBtn.addEventListener('click', resetParams);
-  dom.screenshotBtn.addEventListener('click', saveScreenshot);
-
-  syncSliderAndInput(dom.topWidthSlider,    dom.topWidthValue,    'topWidth');
-  syncSliderAndInput(dom.vertOffsetSlider,  dom.vertOffsetValue,  'vertOffset');
-  syncSliderAndInput(dom.horizOffsetSlider, dom.horizOffsetValue, 'horizOffset');
-
-  dom.showGrid.addEventListener('change', () => {
-    state.showGrid = dom.showGrid.checked;
-    if (!state.showGrid && !state.showOriginal) clearOverlay();
-  });
-
-  dom.showOriginal.addEventListener('change', () => {
-    state.showOriginal = dom.showOriginal.checked;
-    if (!state.showGrid && !state.showOriginal) clearOverlay();
-  });
-
-  document.querySelectorAll('input[name="interpolation"]').forEach(radio => {
-    radio.addEventListener('change', onInterpolationChange);
-  });
-
-  window.addEventListener('resize', debounce(onResize, 200));
-
-  // デバイスの接続/切断を検知
-  navigator.mediaDevices.addEventListener('devicechange', enumerateCameras);
-}
-
-// ==========================================
-// デバウンス
-// ==========================================
-function debounce(fn, delay) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
-  };
 }
 
 // ==========================================
@@ -510,8 +406,6 @@ function debounce(fn, delay) {
 // ==========================================
 function saveScreenshot() {
   try {
-    // WebGL Canvas を preserveDrawingBuffer なしで取得するため
-    // 合成 Canvas に描画してから保存する
     const merged = document.createElement('canvas');
     merged.width  = dom.outputCanvas.width;
     merged.height = dom.outputCanvas.height;
@@ -523,50 +417,72 @@ function saveScreenshot() {
     const a = document.createElement('a');
     a.href = url;
     const now = new Date();
-    const ts = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
-    a.download = `trapezoid_correction_${ts}.png`;
+    const ts  = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
+    a.download = `trapezoid_${ts}.png`;
     a.click();
   } catch (e) {
-    console.error('スクリーンショット保存エラー:', e);
-    alert('スクリーンショットの保存に失敗しました。');
+    alert('スクリーンショットの保存に失敗しました: ' + e.message);
   }
 }
 
 // ==========================================
-// スライダートラックの塗り色を更新
+// リサイズ
 // ==========================================
-function updateSliderTrack(slider) {
-  const min = parseFloat(slider.min);
-  const max = parseFloat(slider.max);
-  const val = parseFloat(slider.value);
-  const pct = ((val - min) / (max - min)) * 100;
-  slider.style.background =
-    `linear-gradient(to right, var(--accent-blue) 0%, var(--accent-cyan) ${pct}%, var(--bg-input) ${pct}%)`;
+function onResize() {
+  setupCanvasSize();
+  if (!state.isRunning) clearOverlay();
 }
 
-function initSliderTracks() {
-  [dom.topWidthSlider, dom.vertOffsetSlider, dom.horizOffsetSlider].forEach(slider => {
-    updateSliderTrack(slider);
-    slider.addEventListener('input', () => updateSliderTrack(slider));
+function debounce(fn, delay) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), delay); };
+}
+
+// ==========================================
+// イベント登録
+// ==========================================
+function registerEvents() {
+  dom.startBtn.addEventListener('click', startCamera);
+  dom.stopBtn.addEventListener('click', stopCamera);
+  dom.resetBtn.addEventListener('click', resetParams);
+  dom.screenshotBtn.addEventListener('click', saveScreenshot);
+
+  syncSliderAndInput(dom.topWidthSlider,    dom.topWidthValue,    'topWidth');
+  syncSliderAndInput(dom.vertOffsetSlider,  dom.vertOffsetValue,  'vertOffset');
+  syncSliderAndInput(dom.horizOffsetSlider, dom.horizOffsetValue, 'horizOffset');
+
+  dom.qualitySelect.addEventListener('change', () => {
+    state.quality = dom.qualitySelect.value;
   });
+
+  dom.showGrid.addEventListener('change', () => {
+    state.showGrid = dom.showGrid.checked;
+    if (!state.showGrid && !state.showOriginal) clearOverlay();
+  });
+  dom.showOriginal.addEventListener('change', () => {
+    state.showOriginal = dom.showOriginal.checked;
+    if (!state.showGrid && !state.showOriginal) clearOverlay();
+  });
+
+  window.addEventListener('resize', debounce(onResize, 200));
+  navigator.mediaDevices.addEventListener('devicechange', enumerateCameras);
 }
 
 // ==========================================
-// アプリケーション初期化
+// 初期化
 // ==========================================
 async function init() {
   setupCanvasSize();
-  const webglOk = Renderer.init(dom.outputCanvas);
-  if (!webglOk) {
-    dom.infoTransform && (dom.infoTransform.textContent = '変形: Canvas2D（低速）');
-  }
+  Renderer.init(dom.outputCanvas);
+
+  dom.infoTransform.textContent = '変形: Canvas 2D スキャンライン';
+
   registerEvents();
   initSliderTracks();
   updateTrapezoidPreview();
   updateInfoBar();
   await enumerateCameras();
 
-  // navigator.mediaDevices が利用不可の場合
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('error', 'カメラAPI非対応');
     dom.startBtn.disabled = true;
@@ -574,7 +490,4 @@ async function init() {
   }
 }
 
-// ==========================================
-// エントリーポイント
-// ==========================================
 document.addEventListener('DOMContentLoaded', init);

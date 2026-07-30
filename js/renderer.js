@@ -1,224 +1,151 @@
 /**
- * renderer.js
- * WebGL を使って映像をリアルタイムに射影変換して描画するレンダラー
+ * renderer.js  — Canvas 2D 専用レンダラー（WebGL 不使用）
  *
- * アルゴリズム:
- *   1. カメラ映像をテクスチャとしてアップロード
- *   2. フラグメントシェーダで逆射影変換を行い
- *      出力ピクセルごとに入力テクスチャの対応座標を参照（逆マッピング）
- *   3. バイリニア補間は WebGL の texture2D が自動的に行う
+ * アルゴリズム: 水平スキャンライン分割法
+ * ──────────────────────────────────────────
+ * 出力キャンバスを N 本の水平スライスに分割し、
+ * 各スライスについて「その y 位置での入力幅・左端」を
+ * 台形の線形補間で求め、ctx.drawImage で横方向にストレッチ描画する。
+ *
+ *   入力映像（台形）:
+ *       topLeft ─────── topRight      ← 上辺（幅が可変）
+ *      /                         \
+ *    botLeft ─────────────── botRight  ← 下辺（= 出力全幅）
+ *
+ *   → 各 y 行ごとに入力側の [srcX, srcW] を線形補間して求め、
+ *     出力側の [0, outW] にスケールして描画
+ * ──────────────────────────────────────────
  */
 
 'use strict';
 
 const Renderer = (() => {
-  // ---------------------------------------------------------
-  // GLSL シェーダソース
-  // ---------------------------------------------------------
+  let _canvas    = null;   // 出力用 Canvas
+  let _ctx       = null;   // 2D コンテキスト
+  let _offscreen = null;   // オフスクリーン Canvas（映像フレーム保持用）
+  let _offCtx    = null;
 
-  // 頂点シェーダ: クリップ空間の4頂点（フルスクリーン四角形）
-  const VERT_SRC = `
-    attribute vec2 a_position;
-    varying vec2 v_texcoord;
-    void main() {
-      // NDC に変換（-1..1）
-      gl_Position = vec4(a_position, 0.0, 1.0);
-      // UV座標（0..1）
-      v_texcoord = a_position * 0.5 + 0.5;
-    }
-  `;
+  // スキャンライン分割数（大きいほど高品質・重い）
+  let _slices = 120;
 
-  // フラグメントシェーダ: 逆ホモグラフィで入力テクスチャを参照
-  const FRAG_SRC = `
-    precision mediump float;
-    uniform sampler2D u_texture;
-    uniform mat3      u_invH;      // 逆射影変換行列（出力→入力）
-    uniform vec2      u_resolution;// 出力解像度
-    varying vec2      v_texcoord;
-
-    void main() {
-      // 出力ピクセル座標（0..W, 0..H）
-      vec2 outPx = v_texcoord * u_resolution;
-      // 出力座標を Y 反転（WebGL のテクスチャ座標系）
-      vec2 outPxFlip = vec2(outPx.x, u_resolution.y - outPx.y);
-
-      // 逆射影変換で入力テクスチャ座標を求める
-      vec3 srcH = u_invH * vec3(outPxFlip, 1.0);
-      vec2 srcPx = srcH.xy / srcH.z;
-
-      // 正規化UV (0..1)
-      vec2 uv = srcPx / u_resolution;
-
-      // 範囲外はクランプ（黒）
-      if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-      } else {
-        gl_FragColor = texture2D(u_texture, uv);
-      }
-    }
-  `;
-
-  let gl = null;
-  let program = null;
-  let texture = null;
-  let positionBuffer = null;
-  let uInvH = null;
-  let uResolution = null;
-  let uTexture = null;
-
-  // ---------------------------------------------------------
+  // ──────────────────────────────
   // 初期化
-  // ---------------------------------------------------------
+  // ──────────────────────────────
   function init(canvas) {
-    // WebGL2 を優先し、フォールバックとして WebGL1 を試みる
-    gl = canvas.getContext('webgl2', {
-      antialias: false,
-      alpha: false,
-      preserveDrawingBuffer: true,  // スクリーンショット用
-    }) || canvas.getContext('webgl', {
-      antialias: false,
-      alpha: false,
-      preserveDrawingBuffer: true,
-    }) || canvas.getContext('experimental-webgl', {
-      antialias: false,
-      alpha: false,
-      preserveDrawingBuffer: true,
-    });
+    _canvas = canvas;
+    _ctx    = canvas.getContext('2d');
+    if (!_ctx) return false;
 
-    if (!gl) {
-      console.error('WebGL が利用できません');
-      return false;
-    }
-
-    // シェーダコンパイル
-    const vert = compileShader(gl.VERTEX_SHADER, VERT_SRC);
-    const frag = compileShader(gl.FRAGMENT_SHADER, FRAG_SRC);
-    if (!vert || !frag) return false;
-
-    // プログラムリンク
-    program = gl.createProgram();
-    gl.attachShader(program, vert);
-    gl.attachShader(program, frag);
-    gl.linkProgram(program);
-
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      console.error('シェーダのリンクに失敗:', gl.getProgramInfoLog(program));
-      return false;
-    }
-
-    gl.useProgram(program);
-
-    // フルスクリーン四角形 (2つの三角形)
-    const positions = new Float32Array([
-      -1, -1,   1, -1,   -1, 1,
-      -1,  1,   1, -1,    1, 1,
-    ]);
-    positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-
-    const aPosition = gl.getAttribLocation(program, 'a_position');
-    gl.enableVertexAttribArray(aPosition);
-    gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
-
-    // テクスチャ作成
-    texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
-    // Uniform ロケーション
-    uInvH       = gl.getUniformLocation(program, 'u_invH');
-    uResolution = gl.getUniformLocation(program, 'u_resolution');
-    uTexture    = gl.getUniformLocation(program, 'u_texture');
+    // オフスクリーン Canvas を生成
+    _offscreen = document.createElement('canvas');
+    _offCtx    = _offscreen.getContext('2d');
 
     return true;
   }
 
-  // ---------------------------------------------------------
-  // フレーム描画
-  // ---------------------------------------------------------
-  /**
-   * @param {HTMLVideoElement|HTMLCanvasElement} source  映像ソース
-   * @param {Float64Array} invH  逆射影変換行列 (3x3, 行優先)
-   * @param {boolean} useNearest  最近傍補間を使うか
-   */
-  function renderFrame(source, invH, useNearest = false) {
-    if (!gl || !program) return;
+  // ──────────────────────────────
+  // フレーム描画（台形 → 長方形 変換）
+  //
+  //  source           : HTMLVideoElement
+  //  topWidthPercent  : 上辺幅 % (100 = 等幅, 50 = 上半分の幅, 200 = 2倍)
+  //  vertOffsetPct    : 垂直オフセット %
+  //  horizOffsetPct   : 水平オフセット %
+  //  quality          : 'low'|'medium'|'high' でスライス数変更
+  // ──────────────────────────────
+  function renderFrame(source, topWidthPercent, vertOffsetPct, horizOffsetPct, quality) {
+    if (!_canvas || !_ctx) return;
 
-    const W = gl.canvas.width;
-    const H = gl.canvas.height;
+    const outW = _canvas.width;
+    const outH = _canvas.height;
 
-    gl.viewport(0, 0, W, H);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // スライス数をクオリティで切り替え
+    _slices = quality === 'high' ? 240 : quality === 'low' ? 60 : 120;
 
-    // テクスチャ補間設定
-    const filter = useNearest ? gl.NEAREST : gl.LINEAR;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-
-    // 映像フレームをテクスチャに転送
+    // ── オフスクリーンに映像フレームを描画 ──
+    _offscreen.width  = outW;
+    _offscreen.height = outH;
     try {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    } catch (e) {
+      _offCtx.drawImage(source, 0, 0, outW, outH);
+    } catch (_e) {
       return;
     }
 
-    // 逆行列を uniform に設定（column-major で渡す）
-    // WebGL の uniformMatrix3fv は列優先なので転置して渡す
-    const invHT = new Float32Array([
-      invH[0], invH[3], invH[6],
-      invH[1], invH[4], invH[7],
-      invH[2], invH[5], invH[8],
-    ]);
-    gl.uniformMatrix3fv(uInvH, false, invHT);
-    gl.uniform2f(uResolution, W, H);
-    gl.uniform1i(uTexture, 0);
+    // ── パラメータ計算 ──
+    const topRatio  = topWidthPercent / 100;
+    const vertOff   = (vertOffsetPct  / 100) * outH;
+    const horizOff  = (horizOffsetPct / 100) * outW;
 
-    // 描画
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
+    // 入力座標系（オフスクリーン上）の台形頂点
+    //   下辺: x=[botLeft, botRight], y=botY
+    //   上辺: x=[topLeft, topRight], y=topY  （幅 = outW * topRatio）
+    const topW     = outW * topRatio;
+    const topLeft  = (outW - topW) / 2 + horizOff;
+    const topRight = topLeft + topW;
+    const botLeft  = 0  + horizOff * 0.5;
+    const botRight = outW + horizOff * 0.5;
+    const topY     = 0   + vertOff;
+    const botY     = outH + vertOff;
 
-  // ---------------------------------------------------------
-  // ユーティリティ
-  // ---------------------------------------------------------
-  function compileShader(type, src) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, src);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      console.error('シェーダコンパイルエラー:', gl.getShaderInfoLog(shader));
-      gl.deleteShader(shader);
-      return null;
+    // ── 出力キャンバスをクリア ──
+    _ctx.clearRect(0, 0, outW, outH);
+
+    const sliceH = outH / _slices;   // 出力1スライスの高さ
+
+    // ── 各スライスを描画 ──
+    for (let i = 0; i < _slices; i++) {
+      // スライスの出力 Y 範囲
+      const outY0 = i       * sliceH;
+      const outY1 = (i + 1) * sliceH;
+
+      // 出力上端・下端の t（0=上, 1=下）
+      const t0 = outY0 / outH;
+      const t1 = outY1 / outH;
+
+      // 入力側の対応 Y（線形補間）
+      const srcY0 = topY + (botY - topY) * t0;
+      const srcY1 = topY + (botY - topY) * t1;
+
+      // 入力側のその y での左端・幅（線形補間）
+      const srcX0  = topLeft  + (botLeft  - topLeft)  * t0;
+      const srcX1r = topRight + (botRight - topRight) * t0;
+      const srcW0  = srcX1r - srcX0;
+
+      // 入力の高さスライス（srcY0 〜 srcY1）
+      const srcSliceH = srcY1 - srcY0;
+
+      if (srcW0 <= 0 || srcSliceH <= 0) continue;
+
+      // ctx.drawImage で台形スライスを長方形にストレッチ
+      _ctx.drawImage(
+        _offscreen,
+        srcX0,     srcY0,           // 入力: 左上
+        srcW0,     srcSliceH,       // 入力: 幅・高さ
+        0,         outY0,           // 出力: 左上
+        outW,      sliceH + 0.5     // 出力: 幅・高さ（+0.5 でスキマ防止）
+      );
     }
-    return shader;
   }
 
-  function setNearestInterpolation(use) {
-    if (!gl || !texture) return;
-    const filter = use ? gl.NEAREST : gl.LINEAR;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  }
-
+  // ──────────────────────────────
+  // ユーティリティ
+  // ──────────────────────────────
   function isReady() {
-    return !!gl && !!program;
+    return !!_ctx;
   }
 
-  function getContext() {
-    return gl;
+  function getCanvas() {
+    return _canvas;
+  }
+
+  function clear() {
+    if (_ctx) _ctx.clearRect(0, 0, _canvas.width, _canvas.height);
   }
 
   return {
     init,
     renderFrame,
-    setNearestInterpolation,
     isReady,
-    getContext,
+    getCanvas,
+    clear,
   };
 })();
