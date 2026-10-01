@@ -1,195 +1,182 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>カメラ台形補正シミュレーター</title>
-  <link rel="stylesheet" href="css/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0f1115">
+<meta name="description" content="Webカメラ・スマートフォンのカメラで斜め上から映したテーブルを、真上から見たような映像に変形して表示します。">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>カメラ斜め映像変形</title>
+<link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div id="app">
+<div id="app">
 
-    <!-- ヘッダー -->
-    <header id="main-header">
-      <div class="header-inner">
-        <div class="header-title">
-          <span class="header-icon">📐</span>
-          <h1>カメラ台形補正シミュレーター</h1>
+  <!-- ===== ヘッダー ===== -->
+  <header id="topbar">
+    <div class="topbar-left">
+      <span class="logo">▱</span>
+      <h1>カメラ斜め映像変形</h1>
+    </div>
+    <div class="topbar-right">
+      <span id="mode-chip" class="chip chip-setup">設定モード</span>
+      <span id="angle-chip" class="chip chip-angle">真上</span>
+    </div>
+  </header>
+
+  <!-- ===== 映像ステージ ===== -->
+  <main id="stage">
+    <div id="stage-inner">
+      <!-- 設定モード: 映像 + 半透明台形オーバーレイ -->
+      <canvas id="setup-canvas"></canvas>
+      <!-- プレビューモード: 平面に変形した映像 -->
+      <canvas id="preview-canvas" class="hidden"></canvas>
+      <!-- プレビュー用ガイドグリッド（WebGL上に重ねる） -->
+      <div id="grid-overlay" class="grid-overlay hidden"></div>
+
+      <!-- 起動前オーバーレイ -->
+      <div id="splash" class="overlay">
+        <div class="overlay-box">
+          <div class="overlay-icon">📷</div>
+          <h2>カメラを開始します</h2>
+          <p>
+            テーブルを斜め上から映したカメラ映像を、<br>
+            真上から見たような映像に変形します。
+          </p>
+          <button id="splash-start" class="btn btn-primary btn-lg">
+            <span class="btn-ico">▶</span> カメラを開始
+          </button>
+          <p class="overlay-note">
+            ※ カメラの使用を許可してください（HTTPS または localhost が必要です）
+          </p>
         </div>
-        <p class="header-desc">斜め撮影映像を真上から見た映像に変換します</p>
       </div>
-    </header>
 
-    <main id="main-content">
-
-      <!-- ─── 左: コントロールパネル ─── -->
-      <aside id="control-panel">
-
-        <!-- カメラ選択 -->
-        <section class="panel-section">
-          <h2 class="section-title"><span class="icon">📷</span> カメラ選択</h2>
-          <div class="control-group">
-            <select id="camera-select" class="styled-select">
-              <option value="">カメラを検索中...</option>
-            </select>
-            <div class="btn-row">
-              <button id="start-btn" class="btn btn-primary">
-                <span class="btn-icon">▶</span> 開始
-              </button>
-              <button id="stop-btn" class="btn btn-danger" disabled>
-                <span class="btn-icon">⏹</span> 停止
-              </button>
-            </div>
-          </div>
-          <div id="camera-status" class="status-badge status-idle">待機中</div>
-        </section>
-
-        <!-- 変形設定 -->
-        <section class="panel-section">
-          <h2 class="section-title"><span class="icon">🔧</span> 変形設定</h2>
-
-          <!-- 上辺の幅 -->
-          <div class="slider-group">
-            <div class="slider-header">
-              <label for="top-width-slider" class="slider-label">
-                <span class="icon">↔</span> 上辺の幅
-              </label>
-              <div class="slider-value-box">
-                <input type="number" id="top-width-value"
-                  class="value-input" min="10" max="300" value="100">
-                <span class="value-unit">%</span>
-              </div>
-            </div>
-            <input type="range" id="top-width-slider"
-              class="slider" min="10" max="300" value="100" step="1">
-            <div class="slider-ticks">
-              <span>10%</span><span>100%（原寸）</span><span>300%</span>
-            </div>
-          </div>
-
-          <!-- 垂直オフセット -->
-          <div class="slider-group">
-            <div class="slider-header">
-              <label for="vert-offset-slider" class="slider-label">
-                <span class="icon">↕</span> 垂直オフセット
-              </label>
-              <div class="slider-value-box">
-                <input type="number" id="vert-offset-value"
-                  class="value-input" min="-50" max="50" value="0">
-                <span class="value-unit">%</span>
-              </div>
-            </div>
-            <input type="range" id="vert-offset-slider"
-              class="slider" min="-50" max="50" value="0" step="1">
-            <div class="slider-ticks">
-              <span>-50%</span><span>0%</span><span>+50%</span>
-            </div>
-          </div>
-
-          <!-- 水平オフセット -->
-          <div class="slider-group">
-            <div class="slider-header">
-              <label for="horiz-offset-slider" class="slider-label">
-                <span class="icon">⇔</span> 水平オフセット
-              </label>
-              <div class="slider-value-box">
-                <input type="number" id="horiz-offset-value"
-                  class="value-input" min="-50" max="50" value="0">
-                <span class="value-unit">%</span>
-              </div>
-            </div>
-            <input type="range" id="horiz-offset-slider"
-              class="slider" min="-50" max="50" value="0" step="1">
-            <div class="slider-ticks">
-              <span>左</span><span>中央</span><span>右</span>
-            </div>
-          </div>
-
-          <!-- 台形プレビュー（折りたたみ） -->
-          <details class="trapezoid-details">
-            <summary class="trapezoid-summary">▶ 変形プレビュー</summary>
-            <div class="trapezoid-preview">
-              <svg id="trapezoid-svg" viewBox="0 0 200 100"
-                   preserveAspectRatio="xMidYMid meet">
-                <polygon id="trapezoid-shape"
-                  points="70,8 130,8 170,92 30,92"
-                  fill="rgba(79,142,247,0.08)" stroke="#4f8ef7" stroke-width="2"/>
-                <line id="top-line"
-                  x1="70" y1="8" x2="130" y2="8"
-                  stroke="#f7c34f" stroke-width="3" stroke-linecap="round"/>
-              </svg>
-            </div>
-          </details>
-
-          <button id="reset-btn" class="btn btn-secondary btn-full">
-            <span class="btn-icon">↺</span> リセット
-          </button>
-        </section>
-
-        <!-- 表示設定 -->
-        <section class="panel-section">
-          <h2 class="section-title"><span class="icon">🖥️</span> 表示設定</h2>
-
-          <div class="toggle-group">
-            <label class="toggle-label">
-              <input type="checkbox" id="show-grid" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>グリッド表示</span>
-            </label>
-            <label class="toggle-label">
-              <input type="checkbox" id="show-original" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>台形輪郭を重ねる</span>
-            </label>
-          </div>
-
-          <div class="inline-row">
-            <label class="small-label">描画品質</label>
-            <select id="quality-select" class="styled-select styled-select-sm">
-              <option value="low">低（高速）</option>
-              <option value="medium" selected>標準</option>
-              <option value="high">高（低速）</option>
-            </select>
-          </div>
-
-          <button id="screenshot-btn" class="btn btn-secondary btn-full" disabled>
-            <span class="btn-icon">📸</span> スクリーンショット保存
-          </button>
-        </section>
-
-      </aside>
-
-      <!-- ─── 右: プレビューエリア ─── -->
-      <section id="preview-area">
-        <div id="canvas-wrapper">
-          <canvas id="output-canvas"></canvas>
-          <canvas id="overlay-canvas"></canvas>
-          <div id="placeholder">
-            <div class="placeholder-inner">
-              <div class="placeholder-icon">📷</div>
-              <p class="placeholder-title">カメラを選択して開始</p>
-              <p class="placeholder-desc">
-                左パネルからカメラを選択し、<br>「開始」ボタンを押してください。
-              </p>
-            </div>
-          </div>
+      <!-- エラーオーバーレイ -->
+      <div id="error-overlay" class="overlay hidden">
+        <div class="overlay-box">
+          <div class="overlay-icon">⚠️</div>
+          <h2>カメラを利用できません</h2>
+          <p id="error-text">—</p>
+          <button id="error-retry" class="btn btn-primary btn-lg">再試行</button>
         </div>
+      </div>
 
-        <div id="canvas-info-bar">
-          <span id="info-resolution">解像度: --</span>
-          <span id="info-fps">FPS: --</span>
-          <span id="info-top-width">上辺幅: 100%</span>
-          <span id="info-transform">変形: Canvas 2D スキャンライン</span>
+      <!-- 画面内ヒント -->
+      <div id="hint" class="hint">
+        <span id="hint-text">台形の枠がテーブルの範囲に合うように、カメラの角度を選んでください</span>
+      </div>
+    </div>
+  </main>
+
+  <!-- ===== 操作バー ===== -->
+  <nav id="controls">
+    <div class="controls-main">
+      <!-- モード切替ボタン（1つ） -->
+      <button id="mode-btn" class="btn btn-mode" type="button">
+        <span class="btn-ico">👁</span>
+        <span class="btn-label">プレビューへ切替</span>
+      </button>
+
+      <!-- 角度切替ボタン（1つ・押す度に 真上→斜め①→斜め②→真上…） -->
+      <button id="angle-btn" class="btn btn-angle" type="button">
+        <span class="btn-ico">📐</span>
+        <span class="btn-label">カメラ角度：<strong id="angle-btn-value">真上</strong></span>
+        <span class="btn-sub" id="angle-btn-next">次：斜め①（60度）</span>
+      </button>
+
+      <!-- 補助メニュー -->
+      <div class="controls-side">
+        <button id="switch-cam-btn" class="btn btn-icon" type="button" title="カメラを切り替え" aria-label="カメラを切り替え">⟲</button>
+        <button id="settings-btn" class="btn btn-icon" type="button" title="詳細設定" aria-label="詳細設定">⚙</button>
+      </div>
+    </div>
+
+    <!-- 角度の3段階インジケーター -->
+    <div class="angle-steps" id="angle-steps">
+      <button class="step" data-index="0" type="button"><b>真上</b><span>90度</span></button>
+      <button class="step" data-index="1" type="button"><b>斜め①</b><span>60度</span></button>
+      <button class="step" data-index="2" type="button"><b>斜め②</b><span>45度</span></button>
+    </div>
+  </nav>
+
+  <!-- ===== 詳細設定パネル ===== -->
+  <section id="panel" class="panel hidden" aria-hidden="true">
+    <div class="panel-head">
+      <h2>詳細設定</h2>
+      <button id="panel-close" class="btn btn-icon" type="button" aria-label="閉じる">✕</button>
+    </div>
+
+    <div class="panel-body">
+      <div class="field">
+        <label for="camera-select">カメラ</label>
+        <select id="camera-select" class="select"></select>
+      </div>
+
+      <div class="field">
+        <div class="field-head">
+          <label for="spread-range">台形の強さ</label>
+          <output id="spread-out">0.35</output>
         </div>
-      </section>
+        <input id="spread-range" class="range" type="range" min="0.10" max="0.70" step="0.01" value="0.35">
+        <p class="field-note">テーブルの写っている奥行き量。大きいほど台形の傾きが強くなります。</p>
+      </div>
 
-    </main>
-  </div>
+      <div class="field">
+        <div class="field-head">
+          <label for="offset-range">枠の上下位置</label>
+          <output id="offset-out">0%</output>
+        </div>
+        <input id="offset-range" class="range" type="range" min="-40" max="40" step="1" value="0">
+      </div>
 
-  <video id="source-video" autoplay playsinline muted style="display:none;"></video>
+      <div class="field">
+        <label for="ratio-select">出力の縦横比</label>
+        <select id="ratio-select" class="select">
+          <option value="1.3333">4 : 3</option>
+          <option value="1.7778">16 : 9</option>
+          <option value="1.5">3 : 2</option>
+          <option value="1">1 : 1</option>
+          <option value="0.75">3 : 4（縦）</option>
+        </select>
+      </div>
 
-  <script src="js/homography.js"></script>
-  <script src="js/renderer.js"></script>
-  <script src="js/app.js"></script>
+      <div class="field field-row">
+        <label for="mirror-check">左右反転（ミラー）</label>
+        <input id="mirror-check" type="checkbox" class="switch">
+      </div>
+
+      <div class="field field-row">
+        <label for="grid-check">ガイドグリッドを表示</label>
+        <input id="grid-check" type="checkbox" class="switch" checked>
+      </div>
+
+      <div class="field">
+        <button id="shot-btn" class="btn btn-secondary btn-block" type="button">🖼 現在の映像を保存（PNG）</button>
+      </div>
+
+      <div class="field">
+        <button id="reset-btn" class="btn btn-ghost btn-block" type="button">設定を初期値に戻す</button>
+      </div>
+
+      <div id="info" class="info">
+        <div><span>状態</span><b id="info-state">停止中</b></div>
+        <div><span>入力解像度</span><b id="info-res">—</b></div>
+        <div><span>描画</span><b id="info-fps">—</b></div>
+        <div><span>変形方式</span><b id="info-engine">—</b></div>
+      </div>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+</div>
+
+<video id="video" playsinline autoplay muted></video>
+
+<script src="js/geometry.js"></script>
+<script src="js/renderer.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
